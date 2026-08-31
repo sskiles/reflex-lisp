@@ -1,0 +1,22 @@
+# Compiled Lisp files
+*.fasl
+*.abcl
+*.clisp
+*.sbin
+*.lfsl
+*.dx64fsl
+*.dxfsl
+*.pfsl
+*.sse2fsl
+*.core
+# ASDF
+*/asdf-output/
+# Quicklisp
+~/quicklisp/
+# SBCL
+sbcl-*
+# Documentation
+doc/
+# Misc
+*~
+*.bak
