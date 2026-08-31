@@ -6,6 +6,64 @@
 (defparameter *default-model* "openai/gpt-oss-20b")
 (defparameter *default-api-key* (uiop:getenv "NVIDIA_API_KEY"))
 
+(defparameter *default-system-prompt*
+  "You are a coding agent with access to a file system, shell, AND a live Lisp image.
+
+Available tools:
+- read-file: Read a file's contents
+- write-file: Create or overwrite a file
+- edit-file: Make exact string replacements in a file
+- bash: Execute shell commands
+- eval-lisp: Evaluate a Lisp expression in the running SBCL image (use this to actually RUN Lisp code, not just print it)
+- query: Eval-if-Lisp-or-ask-LLM (input starting with '(' is evaluated, else sent to LLM)
+- save-image: Save the entire Lisp state to a .core file
+
+IMPORTANT: When the user gives you Lisp code or asks you to write/run Lisp, USE THE EVAL-LISP TOOL to actually execute it. Do not just print code snippets — execute them and report the actual results. The running image is fully accessible: you can define functions, modify variables, load files, and inspect any state via eval-lisp.
+
+LISP CODING BEST PRACTICES:
+- Use functional programming paradigms where practical.
+- Prioritize tail recursion, clean lexical bindings (LET, LET*), and robust error handling (handler-case, restart-case).
+- Document packages, classes, and complex functions with clear docstrings.
+- Before committing edits, run Lisp code and tests locally via the `eval-lisp` tool to confirm correctness.
+- The running SBCL image is fully interactive and live; modify variables, redefine functions, and inspect state dynamically.
+
+Work in the current directory. Prefer reading files before editing. Be concise. Show your work by executing code, not just describing it."
+  "Default system prompt used by SEND-PROMPT and ASK.")
+
+(defvar *default-history* nil
+  "Default conversation history used by SEND-PROMPT and ASK.
+Each element is an alist of the form ((\"role\" . \"user\") (\"content\" . \"...\")) or
+((\"role\" . \"assistant\") (\"content\" . \"...\")).  When NIL the request contains
+only the system message (if any) and the new user turn.")
+
+;;; --- Restore hook -------------------------------------------------------
+;; Run automatically by SBCL whenever a saved core is restored.
+;; Resets foreign resources (dexador's connection pool) and refreshes the
+;; API key from the environment so a core saved with an unset key picks up
+;; the current value when reloaded.
+
+(defun %post-restore ()
+  (setf *default-api-key* (uiop:getenv "NVIDIA_API_KEY"))
+  (let ((pool-var (find-symbol "*CONNECTION-POOL*" "DEXADOR"))
+        (use-var  (find-symbol "*USE-CONNECTION-POOL*" "DEXADOR"))
+        (make-fn  (find-symbol "MAKE-CONNECTION-POOL" "DEXADOR")))
+    ;; The saved image intentionally has *CONNECTION-POOL* = NIL (see
+    ;; SAVE-IMAGE).  Build a fresh LRU-POOL and re-enable pooling so the
+    ;; steady-state connection cache works.
+    (when (and pool-var (boundp pool-var) make-fn (fboundp make-fn))
+      (setf (symbol-value pool-var) (funcall make-fn)))
+    (when (and use-var (boundp use-var))
+      (setf (symbol-value use-var) t)))
+  (format t "~&[Restore Hook] Dexador pool rebuilt; NVIDIA_API_KEY refreshed.~%"))
+
+(eval-when (:load-toplevel :execute)
+  ;; Modern SBCL: register as an init hook so it runs after the core loads.
+  (pushnew #'%post-restore sb-ext:*init-hooks*)
+  ;; Older SBCL: register-restore-hook was the way.  Defensive lookup.
+  (let ((hook (find-symbol "REGISTER-RESTORE-HOOK" "SB-EXT")))
+    (when (and hook (fboundp hook))
+      (funcall hook #'%post-restore))))
+
 ;;; HTTP client for an OpenAI-compatible chat-completions endpoint.
 
 (defun %request-headers (api-key)
@@ -15,13 +73,18 @@
             (list (cons "Authorization"
                         (format nil "Bearer ~A" api-key))))))
 
-(defun %request-body (model prompt temperature max-tokens top-p stop)
-  "Encode PROMPT as an OpenAI-compatible chat-completions request body."
+(defun %request-body (model prompt system-prompt history temperature max-tokens top-p stop)
+  "Encode PROMPT, SYSTEM-PROMPT and HISTORY as an OpenAI-compatible chat-completions request body."
   (json:encode-json-alist-to-string
    (append
     `(("model" . ,model)
-      ("messages" . ((("role" . "user")
-                      ("content" . ,prompt)))))
+      ("messages" . ,(append
+                      (when system-prompt
+                        (list (list (cons "role" "system")
+                                    (cons "content" system-prompt))))
+                      history
+                      (list (list (cons "role" "user")
+                                  (cons "content" prompt))))))
     (when temperature
       (list (cons "temperature" temperature)))
     (when max-tokens
@@ -37,15 +100,24 @@
 
 (defun %response-content (body)
   "Extract the first assistant message from a JSON response BODY string.
-When the response is not the expected chat-completions shape, return BODY."
+When the response is not the expected chat-completions shape, return BODY.
+Falls back to reasoning_content when content is null or empty."
   (let ((decoded (handler-case
                      (json:decode-json-from-string body)
                    (error () nil))))
     (let* ((choices (and decoded (%json-value :CHOICES decoded)))
            (first-choice (and (listp choices) (first choices)))
            (message (and first-choice (%json-value :MESSAGE first-choice)))
-           (content (and message (%json-value :CONTENT message))))
-      (or content body))))
+           (content (and message (%json-value :CONTENT message)))
+           (reasoning (or (and message (%json-value :REASONING_CONTENT message))
+                          (and decoded (%json-value :REASONING_CONTENT decoded))
+                          (and decoded (%json-value :REASONING decoded)))))
+      (cond
+        ((and content (stringp content) (not (zerop (length content))))
+         content)
+        ((and reasoning (stringp reasoning) (not (zerop (length reasoning))))
+         reasoning)
+        (t body)))))
 
 (define-condition llm-request-error (error)
   ((url :initarg :url :reader llm-request-error-url)
@@ -63,6 +135,8 @@ When the response is not the expected chat-completions shape, return BODY."
                     (endpoint *default-endpoint*)
                     (model *default-model*)
                     (api-key *default-api-key*)
+                    (system-prompt *default-system-prompt*)
+                    (history *default-history*)
                     (temperature 0.7d0)
                     (max-tokens 512)
                     (top-p 1.0d0)
@@ -70,29 +144,99 @@ When the response is not the expected chat-completions shape, return BODY."
                     (request-function #'dexador:request))
   "Send PROMPT to an OpenAI-compatible chat-completions endpoint.
 
-PROMPT is the string sent as the single user message.  ENDPOINT defaults to
-*DEFAULT-ENDPOINT*, MODEL defaults to *DEFAULT-MODEL*, and API-KEY defaults to
-*DEFAULT-API-KEY*.  The function returns the response text as a string.
+PROMPT is the string sent as the current user message.  ENDPOINT defaults to
+*DEFAULT-ENDPOINT*, MODEL to *DEFAULT-MODEL*, API-KEY to *DEFAULT-API-KEY*,
+SYSTEM-PROMPT to *DEFAULT-SYSTEM-PROMPT* and HISTORY to *DEFAULT-HISTORY*.
+HISTORY is a list of prior message alists; see *DEFAULT-HISTORY* for the shape.
+
+The function returns the response text as a string.
 
 REQUEST-FUNCTION exists primarily for tests and protocol adapters; it is called
 with the same arguments accepted by DEXADOR:REQUEST."
-  (let ((api-key (or api-key (uiop:getenv "NVIDIA_API_KEY"))))
-    (multiple-value-bind (body status response-headers response-uri response-method)
-        (funcall request-function
-                 endpoint
-                 :method :post
-                 :headers (%request-headers api-key)
-                 :content (%request-body model prompt temperature max-tokens top-p stop))
-      (declare (ignore response-headers response-uri response-method))
-      (unless (and (integerp status)
-                   (<= 200 status)
-                   (<= status 299))
-        (error 'llm-request-error
-               :url endpoint
-               :status status
-               :body body))
-      (%response-content body))))
+  (let* ((use-pool-var (find-symbol "*USE-CONNECTION-POOL*" "DEXADOR"))
+         (api-key (or api-key (uiop:getenv "NVIDIA_API_KEY"))))
+    (unwind-protect
+         (progn
+           ;; Re-enable pooling for this request if it was disabled by the
+           ;; restore hook (so we keep pooling for steady-state operation
+           ;; but the first request after restore never reuses a stale handle).
+           (when (and use-pool-var (boundp use-pool-var))
+             (setf (symbol-value use-pool-var) t))
+           (multiple-value-bind (body status response-headers response-uri response-method)
+               (funcall request-function
+                        endpoint
+                        :method :post
+                        :headers (%request-headers api-key)
+                        :content (%request-body model prompt system-prompt history temperature max-tokens top-p stop))
+             (declare (ignore response-headers response-uri response-method))
+             (unless (and (integerp status)
+                          (<= 200 status)
+                          (<= status 299))
+               (error 'llm-request-error
+                      :url endpoint
+                      :status status
+                      :body body))
+             (%response-content body))))))
 
 (defun ask (prompt &rest options)
   "Convenience wrapper around SEND-PROMPT."
   (apply #'send-prompt prompt options))
+
+;;; --- History helpers ----------------------------------------------------
+
+(defun make-message (role content)
+  "Build a single OpenAI-style message alist with ROLE (\"user\", \"assistant\" or \"system\") and CONTENT."
+  (list (cons "role" role)
+        (cons "content" content)))
+
+(defun append-turn (history user-prompt assistant-reply)
+  "Append a user/assistant turn to HISTORY and return the new list."
+  (append history
+          (list (make-message "user" user-prompt)
+                (make-message "assistant" assistant-reply))))
+
+;;; --- Image save/load ----------------------------------------------------
+
+(defun save-image (core-path &key (executable nil))
+  "Save the running SBCL image to CORE-PATH.
+
+When EXECUTABLE is non-nil, embed an :executable t core so the resulting file
+is a standalone binary.  The default (EXECUTABLE NIL) saves a plain .core
+file that must be restarted with
+  sbcl --core CORE-PATH
+which avoids the integrity check that :executable t cores perform.
+
+Before saving, dexador's connection pool is destroyed (set to NIL) and pooling
+is disabled so that no live foreign handles (libcurl, SSL) are baked into the
+image.  After restore, %post-restore re-enables pooling so steady-state
+operation keeps the connection cache."
+  (let ((pool-var (find-symbol "*CONNECTION-POOL*" "DEXADOR"))
+        (use-var  (find-symbol "*USE-CONNECTION-POOL*" "DEXADOR"))
+        (clear-fn (find-symbol "CLEAR-CONNECTION-POOL" "DEXADOR"))
+        (make-fn  (find-symbol "MAKE-CONNECTION-POOL" "DEXADOR")))
+    ;; Pre-save cleanup:
+    ;; 1. Disable pooling so the first request after restore cannot reuse
+    ;;    a stale handle.
+    ;; 2. Clear the pool so any cached connections are released.
+    ;; 3. Null out *connection-pool* entirely.  The LRU-POOL object holds
+    ;;    closures over C pointers (libcurl handles); just clearing the table
+    ;;    does not dispose of those closures, and they cause memory faults
+    ;;    when the saved image is restored.  Replacing the variable with NIL
+    ;;    lets dexador build a fresh pool on first use.
+    (when (and use-var (boundp use-var))
+      (setf (symbol-value use-var) nil))
+    (when (and pool-var (boundp pool-var) clear-fn (fboundp clear-fn))
+      (funcall clear-fn))
+    (when (and pool-var (boundp pool-var))
+      (setf (symbol-value pool-var) nil))
+    (let* ((path (merge-pathnames core-path))
+           (top-level (lambda ()
+                        (format t "~&Reflex image restarted from ~A~%" path)
+                        (format t "Endpoint:   ~A~%" *default-endpoint*)
+                        (format t "Model:      ~A~%" *default-model*)
+                        (format t "History:    ~A message(s)~%" (length *default-history*))
+                        (start))))
+      (declare (ignore make-fn))
+      (if executable
+          (sb-ext:save-lisp-and-die path :toplevel top-level :executable t)
+          (sb-ext:save-lisp-and-die path :toplevel top-level)))))
