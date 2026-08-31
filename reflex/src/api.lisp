@@ -73,8 +73,9 @@ only the system message (if any) and the new user turn.")
             (list (cons "Authorization"
                         (format nil "Bearer ~A" api-key))))))
 
-(defun %request-body (model prompt system-prompt history temperature max-tokens top-p stop)
-  "Encode PROMPT, SYSTEM-PROMPT and HISTORY as an OpenAI-compatible chat-completions request body."
+(defun %request-body (model prompt system-prompt history tools temperature max-tokens top-p stop)
+  "Encode PROMPT, SYSTEM-PROMPT, HISTORY, and TOOLS as an OpenAI-compatible
+chat-completions request body. TOOLS is a list of tool schemas or NIL."
   (json:encode-json-alist-to-string
    (append
     `(("model" . ,model)
@@ -85,6 +86,8 @@ only the system message (if any) and the new user turn.")
                       history
                       (list (list (cons "role" "user")
                                   (cons "content" prompt))))))
+    (when (and tools (consp tools))
+      (list (cons "tools" tools)))
     (when temperature
       (list (cons "temperature" temperature)))
     (when max-tokens
@@ -100,8 +103,9 @@ only the system message (if any) and the new user turn.")
 
 (defun %response-content (body)
   "Extract the first assistant message from a JSON response BODY string.
-When the response is not the expected chat-completions shape, return BODY.
-Falls back to reasoning_content when content is null or empty."
+Returns (values content tool-calls) where CONTENT is the message text (or
+empty string) and TOOL-CALLS is a list of (id . ((name . name) (arguments .
+decoded-args))) alists."
   (let ((decoded (handler-case
                      (json:decode-json-from-string body)
                    (error () nil))))
@@ -111,13 +115,37 @@ Falls back to reasoning_content when content is null or empty."
            (content (and message (%json-value :CONTENT message)))
            (reasoning (or (and message (%json-value :REASONING_CONTENT message))
                           (and decoded (%json-value :REASONING_CONTENT decoded))
-                          (and decoded (%json-value :REASONING decoded)))))
-      (cond
-        ((and content (stringp content) (not (zerop (length content))))
-         content)
-        ((and reasoning (stringp reasoning) (not (zerop (length reasoning))))
-         reasoning)
-        (t body)))))
+                          (and decoded (%json-value :REASONING decoded))))
+           (raw-tool-calls (and message (%json-value :TOOL_CALLS message))))
+      (let ((final-content
+              (cond
+                ((and content (stringp content) (not (zerop (length content))))
+                 content)
+                ((and reasoning (stringp reasoning) (not (zerop (length reasoning))))
+                 reasoning)
+                (t "")))
+            (parsed-calls
+              (when raw-tool-calls
+                (mapcar (lambda (tc)
+                          (let* ((id       (or (%json-value :ID tc)
+                                               (cdr (assoc "id" tc :test #'string=))))
+                                 (function (or (%json-value :FUNCTION tc)
+                                               (cdr (assoc "function" tc :test #'string=))))
+                                 (name     (or (and function (%json-value :NAME function))
+                                               (and function (cdr (assoc "name" function :test #'string=)))))
+                                 (args-raw (or (and function (%json-value :ARGUMENTS function))
+                                               (and function (cdr (assoc "arguments" function :test #'string=)))))
+                                 (args     (cond
+                                             ((null args-raw) nil)
+                                             ((stringp args-raw)
+                                              (handler-case (json:decode-json-from-string args-raw)
+                                                (error () args-raw)))
+                                             (t args-raw))))
+                            (list (cons :id id)
+                                  (cons :name name)
+                                  (cons :arguments args))))
+                        raw-tool-calls))))
+        (values final-content parsed-calls)))))
 
 (define-condition llm-request-error (error)
   ((url :initarg :url :reader llm-request-error-url)
@@ -137,6 +165,9 @@ Falls back to reasoning_content when content is null or empty."
                     (api-key *default-api-key*)
                     (system-prompt *default-system-prompt*)
                     (history *default-history*)
+                    (tools (and (find-package :reflex.tools)
+                                (boundp 'reflex.tools:*tools*)
+                                (reflex.tools:tool-schemas-for-llm)))
                     (temperature 0.7d0)
                     (max-tokens 512)
                     (top-p 1.0d0)
@@ -146,10 +177,12 @@ Falls back to reasoning_content when content is null or empty."
 
 PROMPT is the string sent as the current user message.  ENDPOINT defaults to
 *DEFAULT-ENDPOINT*, MODEL to *DEFAULT-MODEL*, API-KEY to *DEFAULT-API-KEY*,
-SYSTEM-PROMPT to *DEFAULT-SYSTEM-PROMPT* and HISTORY to *DEFAULT-HISTORY*.
-HISTORY is a list of prior message alists; see *DEFAULT-HISTORY* for the shape.
+SYSTEM-PROMPT to *DEFAULT-SYSTEM-PROMPT*, HISTORY to *DEFAULT-HISTORY*, and
+TOOLS to the schemas of every registered tool in REFLEX.TOOLS:*TOOLS*.
 
-The function returns the response text as a string.
+Returns two values: the response content string and a list of tool-call
+alists of the shape ((:ID . \"...\") (:NAME . \"...\") (:ARGUMENTS . alist)).
+Tool-call alists are non-empty only when the LLM chose to invoke tools.
 
 REQUEST-FUNCTION exists primarily for tests and protocol adapters; it is called
 with the same arguments accepted by DEXADOR:REQUEST."
@@ -167,7 +200,7 @@ with the same arguments accepted by DEXADOR:REQUEST."
                         endpoint
                         :method :post
                         :headers (%request-headers api-key)
-                        :content (%request-body model prompt system-prompt history temperature max-tokens top-p stop))
+                        :content (%request-body model prompt system-prompt history tools temperature max-tokens top-p stop))
              (declare (ignore response-headers response-uri response-method))
              (unless (and (integerp status)
                           (<= 200 status)

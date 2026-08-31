@@ -35,11 +35,11 @@
   (unless condition
     (error (apply #'format nil format-control format-arguments))))
 
-(defun run-tests ()
-  "Run all smoke tests and signal an error on failure."
+(defun test-api ()
+  "Smoke tests for the send-prompt HTTP plumbing."
   (let ((reply (reflex:send-prompt
                 "Hello, test endpoint."
-                :url *fake-url*
+                :endpoint *fake-url*
                 :api-key "test-key"
                 :model "test-model"
                 :request-function #'fake-request)))
@@ -49,7 +49,7 @@
   (let ((caught-condition nil))
     (handler-case
         (reflex:send-prompt "Should fail."
-                            :url *fake-url*
+                            :endpoint *fake-url*
                             :api-key "test-key"
                             :model "test-model"
                             :request-function #'failing-request)
@@ -61,6 +61,14 @@
       (check (= (reflex:llm-request-error-status caught-condition) 429)
              "Expected status 429; got ~A"
              (reflex:llm-request-error-status caught-condition))))
-
   (format t "~&REFLEX API smoke tests passed.~%")
+  (finish-output))
+
+(defun run-tests ()
+  "Run all Reflex smoke tests and signal an error on failure."
+  (test-api)
+  (test-eval-lisp)
+  (test-file-tools)
+  (format t "~&All Reflex tests passed.~%")
+  (finish-output)
   t)
