@@ -17,7 +17,7 @@
   :license "Specify license here"
   :version "0.0.1"
   :serial t
-  :depends-on ("dexador" "cl-json")
+  :depends-on ("dexador" "cl-json" "sqlite")
   :components ((:file "src/tools/package")
                (:file "src/tools/registry")
                (:file "src/tools/define-tool")
@@ -25,7 +25,8 @@
                (:file "src/tools/read-file")
                (:file "src/tools/write-file")
                (:file "src/tools/edit-file")
-               (:file "src/tools/bash")))
+               (:file "src/tools/bash")
+               (:file "src/tools/sqlite-sql")))
 
 (asdf:defsystem #:reflex/test
   :description "Self-contained smoke tests for Reflex."
@@ -36,7 +37,8 @@
   :depends-on ("reflex")
   :components ((:file "test/test-api")
                (:file "test/test-eval-lisp")
-               (:file "test/test-file-tools"))
+               (:file "test/test-file-tools")
+               (:file "test/test-sqlite"))
   :perform (asdf:test-op (operation component)
                          (declare (ignore operation component))
                          (uiop:symbol-call :reflex-test :run-tests)))

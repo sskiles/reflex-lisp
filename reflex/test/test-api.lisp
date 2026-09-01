@@ -2,7 +2,7 @@
 
 (defpackage #:reflex-test
   (:use #:cl)
-  (:export #:run-tests))
+  (:export #:run-tests #:test-sqlite))
 
 (in-package #:reflex-test)
 
@@ -69,6 +69,7 @@
   (test-api)
   (test-eval-lisp)
   (test-file-tools)
+  (test-sqlite)
   (format t "~&All Reflex tests passed.~%")
   (finish-output)
   t)
