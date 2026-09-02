@@ -8,6 +8,7 @@
    #:agent-send
    #:query-loop
    #:start
+   #:menu
    #:make-message
    #:append-turn
    #:save-image

@@ -25,7 +25,7 @@ LISP CODING BEST PRACTICES:
 - Prioritize tail recursion, clean lexical bindings (LET, LET*), and robust error handling (handler-case, restart-case).
 - Document packages, classes, and complex functions with clear docstrings.
 - Before committing edits, run Lisp code and tests locally via the `eval-lisp` tool to confirm correctness.
-- The running SBCL image is fully interactive and live; modify variables, redefine functions, and inspect state dynamically.
+- The running SBCL image is fully interactive and live; modify variables, redefine functions, and inspect any state dynamically.
 
 Work in the current directory. Prefer reading files before editing. Be concise. Show your work by executing code, not just describing it."
   "Default system prompt used by SEND-PROMPT and ASK.")
@@ -35,6 +35,10 @@ Work in the current directory. Prefer reading files before editing. Be concise. 
 Each element is an alist of the form ((\"role\" . \"user\") (\"content\" . \"...\")) or
 ((\"role\" . \"assistant\") (\"content\" . \"...\")).  When NIL the request contains
 only the system message (if any) and the new user turn.")
+
+;; Global flag – when true, SEND-PROMPT will request a streaming response.
+(defvar *use-streaming* nil
+  "If non‑NIL, SEND-PROMPT sends the LLM a streaming request and prints tokens as they arrive.")
 
 ;;; --- Restore hook -------------------------------------------------------
 ;; Run automatically by SBCL whenever a saved core is restored.
@@ -68,7 +72,7 @@ only the system message (if any) and the new user turn.")
 
 (defun %request-headers (api-key)
   "Return HTTP request headers for the chat-completions request."
-  (append '(("Content-Type" . "application/json"))
+  (append (list (cons "Content-Type" "application/json"))
           (when api-key
             (list (cons "Authorization"
                         (format nil "Bearer ~A" api-key))))))
@@ -78,14 +82,14 @@ only the system message (if any) and the new user turn.")
 chat-completions request body. TOOLS is a list of tool schemas or NIL."
   (json:encode-json-alist-to-string
    (append
-    `(("model" . ,model)
-      ("messages" . ,(append
-                      (when system-prompt
-                        (list (list (cons "role" "system")
-                                    (cons "content" system-prompt))))
-                      history
-                      (list (list (cons "role" "user")
-                                  (cons "content" prompt))))))
+    (list (cons "model" model)
+          (cons "messages" (append
+                               (when system-prompt
+                                 (list (list (cons "role" "system")
+                                             (cons "content" system-prompt))))
+                               history
+                               (list (list (cons "role" "user")
+                                           (cons "content" prompt))))))
     (when (and tools (consp tools))
       (list (cons "tools" tools)))
     (when temperature
@@ -127,20 +131,20 @@ decoded-args))) alists."
             (parsed-calls
               (when raw-tool-calls
                 (mapcar (lambda (tc)
-                          (let* ((id       (or (%json-value :ID tc)
-                                               (cdr (assoc "id" tc :test #'string=))))
+                          (let* ((id (or (%json-value :ID tc)
+                                         (cdr (assoc "id" tc :test #'string=))))
                                  (function (or (%json-value :FUNCTION tc)
                                                (cdr (assoc "function" tc :test #'string=))))
-                                 (name     (or (and function (%json-value :NAME function))
-                                               (and function (cdr (assoc "name" function :test #'string=)))))
+                                 (name (or (and function (%json-value :NAME function))
+                                           (and function (cdr (assoc "name" function :test #'string=)))))
                                  (args-raw (or (and function (%json-value :ARGUMENTS function))
-                                               (and function (cdr (assoc "arguments" function :test #'string=)))))
-                                 (args     (cond
-                                             ((null args-raw) nil)
-                                             ((stringp args-raw)
-                                              (handler-case (json:decode-json-from-string args-raw)
-                                                (error () args-raw)))
-                                             (t args-raw))))
+                                               (cdr (assoc "arguments" function :test #'string=))))
+                                 (args (cond
+                                         ((null args-raw) nil)
+                                         ((stringp args-raw)
+                                          (handler-case (json:decode-json-from-string args-raw)
+                                            (error () args-raw)))
+                                         (t args-raw))))
                             (list (cons :id id)
                                   (cons :name name)
                                   (cons :arguments args))))
@@ -172,6 +176,7 @@ decoded-args))) alists."
                     (max-tokens 512)
                     (top-p 1.0d0)
                     stop
+                    (stream-p *use-streaming*)
                     (request-function #'dexador:request))
   "Send PROMPT to an OpenAI-compatible chat-completions endpoint.
 
@@ -186,30 +191,108 @@ Tool-call alists are non-empty only when the LLM chose to invoke tools.
 
 REQUEST-FUNCTION exists primarily for tests and protocol adapters; it is called
 with the same arguments accepted by DEXADOR:REQUEST."
+  (let ((api-key (or api-key (uiop:getenv "NVIDIA_API_KEY"))))
+    (if stream-p
+        (send-prompt-stream prompt
+                            :endpoint endpoint
+                            :model model
+                            :api-key api-key
+                            :system-prompt system-prompt
+                            :history history
+                            :tools tools
+                            :temperature temperature
+                            :max-tokens max-tokens
+                            :top-p top-p
+                            :stop stop)
+        (multiple-value-bind (body status)
+            (funcall request-function
+                     endpoint
+                     :method :post
+                     :headers (%request-headers api-key)
+                     :content (%request-body model prompt system-prompt history tools temperature max-tokens top-p stop))
+          (declare (ignore status))
+          (unless (and (integerp status)
+                       (<= 200 status)
+                       (<= status 299))
+            (error 'llm-request-error
+                   :url endpoint
+                   :status status
+                   :body body))
+          (%response-content body)))))
+
+;; -------------------------------------------------------------
+;; Streaming implementation – reads token chunks from the LLM and prints them
+;; as they arrive. Returns the complete concatenated content string.
+(defun send-prompt-stream (prompt &key
+                               (endpoint *default-endpoint*)
+                               (model *default-model*)
+                               (api-key *default-api-key*)
+                               (system-prompt *default-system-prompt*)
+                               (history *default-history*)
+                               (tools (and (find-package :reflex.tools)
+                                          (boundp 'reflex.tools:*tools*)
+                                          (reflex.tools:tool-schemas-for-llm)))
+                               (temperature 0.7d0)
+                               (max-tokens 512)
+                               (top-p 1.0d0)
+                               stop)
+  "Send PROMPT using a streaming request.
+   The LLM must support the `stream` flag (e.g., OpenAI, NVIDIA).
+   Tokens are printed to *standard-output* as they arrive and the full
+   string is returned.  Tool calls are not processed in streaming mode.
+   All other arguments match `send-prompt`."
   (let* ((use-pool-var (find-symbol "*USE-CONNECTION-POOL*" "DEXADOR"))
          (api-key (or api-key (uiop:getenv "NVIDIA_API_KEY"))))
     (unwind-protect
          (progn
-           ;; Re-enable pooling for this request if it was disabled by the
-           ;; restore hook (so we keep pooling for steady-state operation
-           ;; but the first request after restore never reuses a stale handle).
            (when (and use-pool-var (boundp use-pool-var))
              (setf (symbol-value use-pool-var) t))
-           (multiple-value-bind (body status response-headers response-uri response-method)
-               (funcall request-function
-                        endpoint
-                        :method :post
-                        :headers (%request-headers api-key)
-                        :content (%request-body model prompt system-prompt history tools temperature max-tokens top-p stop))
-             (declare (ignore response-headers response-uri response-method))
-             (unless (and (integerp status)
-                          (<= 200 status)
-                          (<= status 299))
-               (error 'llm-request-error
-                      :url endpoint
-                      :status status
-                      :body body))
-             (%response-content body))))))
+           (let ((body (json:encode-json-alist-to-string
+                        (append
+                         (list (cons "model" model)
+                               (cons "messages" (append
+                                                 (when system-prompt
+                                                   (list (list (cons "role" "system")
+                                                               (cons "content" system-prompt))))
+                                                 history
+                                                 (list (list (cons "role" "user")
+                                                             (cons "content" prompt)))))
+                               (cons "stream" t))
+                         (when (and tools (consp tools))
+                           (list (cons "tools" tools)))
+                         (when temperature
+                           (list (cons "temperature" temperature)))
+                         (when max-tokens
+                           (list (cons "max_tokens" max-tokens)))
+                         (when top-p
+                           (list (cons "top_p" top-p)))
+                         (when stop
+                           (list (cons "stop" stop)))))))
+             (let ((stream (dexador:request endpoint
+                                            :method :post
+                                            :headers (%request-headers api-key)
+                                            :content body
+                                            :want-stream t)))
+               (let ((result ""))
+                 (handler-case
+                     (loop for line = (read-line stream nil nil)
+                           while line
+                           do (when (search "data:" line)
+                                (let ((payload (subseq line 5)))
+                                  (unless (string= payload "[DONE]")
+                                    (let ((json (ignore-errors (json:decode-json-from-string payload))))
+                                      (when json
+                                        (let* ((choices (and (listp json) (getf json :choices)))
+                                               (content (and choices (getf (first choices) :delta) (getf (first choices) :content))))
+                                          (when content
+                                            (write-string content)
+                                            (finish-output)
+                                            (setf result (concatenate 'string result content))))))))))
+                   (error (e)
+                     (format t "\n[STREAM ERROR] ~A~%" e)))
+                 (close stream)
+                 result)))))))
+
 
 (defun ask (prompt &rest options)
   "Convenience wrapper around SEND-PROMPT."
