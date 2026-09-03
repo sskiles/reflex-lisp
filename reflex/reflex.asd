@@ -6,10 +6,29 @@
   :license "Specify license here"
   :version "0.0.1"
   :serial t
-  :depends-on ("dexador" "cl-json" "reflex/tools")
+  :depends-on ("dexador" "cl-json" "sqlite" "ironclad" "babel" "ieee-floats"
+               "reflex/tools" "reflex/context")
   :components ((:file "src/package")
                (:file "src/api")
                (:file "src/reflex")))
+
+(asdf:defsystem #:reflex/context
+  :description "Persistent context storage with embeddings and caveman projection."
+  :author "Reflex contributors"
+  :license "Specify license here"
+  :version "0.0.1"
+  :serial t
+  :depends-on ("sqlite" "ironclad" "babel" "ieee-floats")
+  :components ((:file "src/context/package")
+               (:file "src/context/config")
+               (:file "src/context/connect")
+               (:file "src/context/crypto")
+               (:file "src/context/caveman")
+               (:file "src/context/embedding")
+               (:file "src/context/api-add")
+               (:file "src/context/api-caveman")
+               (:file "src/context/api-replay")
+               (:file "src/context/api-search")))
 
 (asdf:defsystem #:reflex/tools
   :description "Tool registry and dispatch for Reflex."

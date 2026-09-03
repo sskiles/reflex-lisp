@@ -21,4 +21,18 @@
    #:llm-request-error
    #:llm-request-error-body
    #:llm-request-error-status
-   #:llm-request-error-url))
+   #:llm-request-error-url
+   ;; context subsystem (re-exported from reflex.context)
+   #:context-add
+   #:context-caveman
+   #:context-replay
+   #:context-search
+   #:*context-table-name*
+   #:*caveman-version*)
+  (:import-from #:reflex.context
+   #:context-add
+   #:context-caveman
+   #:context-replay
+   #:context-search
+   #:*context-table-name*
+   #:*caveman-version*))
