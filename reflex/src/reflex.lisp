@@ -79,6 +79,18 @@ tool_calls array, as required by OpenAI."
     (format t "~%[tool calls]~%")
     (dolist (tc tool-calls) (%format-tool-call tc))
     (dolist (r results) (%format-tool-result r))
+    ;; Persist the assistant turn (tool-call request)
+    (handler-case
+        (reflex.context::%persist-turn "assistant" "assistant" "" )
+      (error () nil))
+    ;; Persist each tool result
+    (dolist (r results)
+      (handler-case
+          (reflex.context::%persist-turn "tool" "tool"
+                                        (cdr (assoc :content r))
+                                        :tool-name (cdr (assoc :name r))
+                                        :tool-call-id (cdr (assoc :id r)))
+        (error () nil)))
     (let ((with-assistant (append history (list assistant-msg))))
       (reduce (lambda (acc result)
                 (append acc
@@ -97,6 +109,10 @@ SEND-PROMPT. Returns the final assistant content string and updates
   (let ((history (or history *session-history*))
         (prompt line)
         (final-content ""))
+    ;; Persist the user turn before the first LLM call
+    (handler-case
+        (reflex.context::%persist-turn "user" "user" line)
+      (error () nil))
     (loop repeat max-iterations do
           (handler-case
               (multiple-value-bind (content tool-calls)
@@ -104,6 +120,11 @@ SEND-PROMPT. Returns the final assistant content string and updates
                 (cond
                   ((null tool-calls)
                    (setf final-content content)
+                   ;; Persist the final assistant reply
+                   (handler-case
+                       (reflex.context::%persist-turn "assistant" "assistant"
+                                                     content)
+                     (error () nil))
                    (return-from agent-send final-content))
                   (t
                    (setf history (%dispatch-tools tool-calls history))

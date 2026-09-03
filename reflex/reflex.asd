@@ -18,7 +18,7 @@
   :license "Specify license here"
   :version "0.0.1"
   :serial t
-  :depends-on ("sqlite" "ironclad" "babel" "ieee-floats")
+  :depends-on ("sqlite" "ironclad" "babel" "ieee-floats" "dexador" "cl-json")
   :components ((:file "src/context/package")
                (:file "src/context/config")
                (:file "src/context/connect")
@@ -28,7 +28,16 @@
                (:file "src/context/api-add")
                (:file "src/context/api-caveman")
                (:file "src/context/api-replay")
-               (:file "src/context/api-search")))
+               (:file "src/context/api-search")
+               ;; Tiered prompt assembly (zones A → B → C)
+               (:file "src/context/budget")
+               (:file "src/context/embed")
+               (:file "src/context/zone-verbatim")
+               (:file "src/context/zone-caveman")
+               (:file "src/context/zone-recall")
+               (:file "src/context/assemble")
+               (:file "src/context/persist")
+               (:file "src/context/embed-nvidia")))
 
 (asdf:defsystem #:reflex/tools
   :description "Tool registry and dispatch for Reflex."

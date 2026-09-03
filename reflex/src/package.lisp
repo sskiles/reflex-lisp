@@ -27,12 +27,30 @@
    #:context-caveman
    #:context-replay
    #:context-search
+   #:context-assemble-prompt
    #:*context-table-name*
-   #:*caveman-version*)
+   #:*caveman-version*
+   #:*default-zone-budget*
+   #:*embed-fn*
+   #:*embed-dim*
+   #:*persist-enabled*
+   #:*current-session-id*
+   #:install-nvidia-embedder
+   #:*nvidia-embed-endpoint*
+   #:*nvidia-embed-model*)
   (:import-from #:reflex.context
    #:context-add
    #:context-caveman
    #:context-replay
    #:context-search
+   #:context-assemble-prompt
    #:*context-table-name*
-   #:*caveman-version*))
+   #:*caveman-version*
+   #:*default-zone-budget*
+   #:*embed-fn*
+   #:*embed-dim*
+   #:*persist-enabled*
+   #:*current-session-id*
+   #:install-nvidia-embedder
+   #:*nvidia-embed-endpoint*
+   #:*nvidia-embed-model*))
