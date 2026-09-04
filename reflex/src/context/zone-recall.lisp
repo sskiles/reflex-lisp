@@ -35,24 +35,37 @@ Returns a list of plists (:ID :KIND :CONTENT :SCORE)."
 
 (defun %ctx-zone-recall (query-embedding &key k session-id token-budget)
   "Build zone C: semantically recalled history.
-Returns (values lines used-tokens)."
+Returns a ZONE-RESULT.  ZONE-RESULT-EXTRA holds (hit . score) pairs
+for every hit returned by the search (including those that were
+skipped due to budget), so the caller can see the full ranking."
   (let* ((hits (%ctx-recall query-embedding :k k :session-id session-id))
          (db (%ctx-connect))
          (lines '())
          (used 0)
-         (rank 0))
+         (skipped 0)
+         (rank 0)
+         (all-scores '()))
     (unwind-protect
          (progn
            (dolist (hit hits)
              (incf rank)
              (let* ((id (getf hit :id))
+                    (score (getf hit :score))
                     (snippet (and (<= rank 2)
                                   (%ctx-fetch-content db id)))
                     (line (%ctx-format-recall hit :snippet snippet))
                     (cost (%ctx-tokens-of line)))
+               (push (cons hit (coerce score 'double-float)) all-scores)
                (when (> (+ used cost) token-budget)
+                 (incf skipped)
                  (return))
                (push line lines)
                (incf used cost)))
-           (values (nreverse lines) used))
+           (make-zone-result
+            :label   "Relevant history (recall)"
+            :lines   (nreverse lines)
+            :used    used
+            :budget  token-budget
+            :skipped skipped
+            :extra   (nreverse all-scores)))
       (sqlite:disconnect db))))

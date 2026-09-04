@@ -2,6 +2,15 @@
 
 (in-package #:reflex.tools)
 
+(defun %read-available (stream)
+  "Read all currently-available data from STREAM.  Returns a string.
+Does NOT wait for more data — only reads what's buffered right now."
+  (with-output-to-string (out)
+    (loop while (listen stream) do
+          (let ((c (read-char-no-hang stream nil :eof)))
+            (when (eq c :eof) (return))
+            (write-char c out)))))
+
 (defun %bash-runner (cmd timeout)
   "Run CMD via /bin/sh, return (stdout stderr exit-code).  Kills the process
 after TIMEOUT seconds if still alive."
@@ -16,28 +25,31 @@ after TIMEOUT seconds if still alive."
          (stderr "")
          (deadline (+ (get-internal-real-time)
                       (* timeout internal-time-units-per-second))))
-    (loop while (sb-ext:process-alive-p proc) do
-          (when (> (get-internal-real-time) deadline)
-            (sb-ext:process-kill proc 9)
-            (return-from %bash-runner
-              (values ""
-                      (format nil "killed after ~As timeout" timeout)
-                      -1)))
-          (when (listen out)
-            (setf stdout (concatenate 'string stdout (read-line out))))
-          (when (listen err)
-            (setf stderr (concatenate 'string stderr (read-line err))))
-          (sleep 0.05))
-    ;; Drain any remaining output.
-    (loop while (listen out) do
-          (setf stdout (concatenate 'string stdout (read-line out) (string #\Newline))))
-    (loop while (listen err) do
-          (setf stderr (concatenate 'string stderr (read-line err) (string #\Newline))))
-    (values stdout stderr (sb-ext:process-exit-code proc))))
+    ;; Poll until process finishes or times out, draining output incrementally
+    ;; to avoid deadlock on commands that produce lots of output.
+    (loop
+      (when (not (sb-ext:process-alive-p proc))
+        ;; Process finished; drain any remaining buffered output.
+        (setf stdout (concatenate 'string stdout (%read-available out)))
+        (setf stderr (concatenate 'string stderr (%read-available err)))
+        (return-from %bash-runner
+          (values stdout stderr (sb-ext:process-exit-code proc))))
+      (when (> (get-internal-real-time) deadline)
+        (sb-ext:process-kill proc 9)
+        (return-from %bash-runner
+          (values ""
+                  (format nil "killed after ~As timeout" timeout)
+                  -1)))
+      (setf stdout (concatenate 'string stdout (%read-available out)))
+      (setf stderr (concatenate 'string stderr (%read-available err)))
+      (sleep 0.05))))
 
 (defun %bash (arguments)
-  (let* ((cmd     (cdr (assoc "command" arguments :test #'string=)))
-         (timeout (or (cdr (assoc "timeout" arguments :test #'string=)) 30)))
+  (let* ((cmd     (or (cdr (assoc "command" arguments :test #'string=))
+                      (cdr (assoc :command arguments :test #'eq))))
+         (timeout (or (cdr (assoc "timeout" arguments :test #'string=))
+                      (cdr (assoc :timeout arguments :test #'eq))
+                      30)))
     (handler-case
         (multiple-value-bind (stdout stderr exit-code)
             (%bash-runner cmd timeout)

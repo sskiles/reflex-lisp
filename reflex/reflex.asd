@@ -32,12 +32,15 @@
                ;; Tiered prompt assembly (zones A → B → C)
                (:file "src/context/budget")
                (:file "src/context/embed")
+               (:file "src/context/zone-result")
                (:file "src/context/zone-verbatim")
                (:file "src/context/zone-caveman")
                (:file "src/context/zone-recall")
+               (:file "src/context/report")
                (:file "src/context/assemble")
                (:file "src/context/persist")
-               (:file "src/context/embed-nvidia")))
+               (:file "src/context/embed-nvidia")
+               (:file "src/context/corpus")))
 
 (asdf:defsystem #:reflex/tools
   :description "Tool registry and dispatch for Reflex."
@@ -66,7 +69,8 @@
   :components ((:file "test/test-api")
                (:file "test/test-eval-lisp")
                (:file "test/test-file-tools")
-               (:file "test/test-sqlite"))
+               (:file "test/test-sqlite")
+               (:file "test/test-context-relevance"))
   :perform (asdf:test-op (operation component)
                          (declare (ignore operation component))
                          (uiop:symbol-call :reflex-test :run-tests)))

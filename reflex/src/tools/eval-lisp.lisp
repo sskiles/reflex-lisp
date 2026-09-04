@@ -5,7 +5,8 @@
 (defun %eval-lisp (arguments)
   "Tool implementation: evaluate the Lisp expression in ARGUMENTS[\"expression\"]
 and return the result as a string. Errors are caught and returned as ERROR:..."
-  (let ((expression (cdr (assoc "expression" arguments :test #'string=))))
+  (let ((expression (or (cdr (assoc "expression" arguments :test #'string=))
+                        (cdr (assoc :expression arguments :test #'eq)))))
     (handler-case
         (let* ((form (read-from-string expression))
                (result (eval form)))

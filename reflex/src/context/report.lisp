@@ -1,0 +1,15 @@
+(in-package #:reflex.context)
+
+(defun %ctx-format-report (zone-results total-budget)
+  "Render a feedback report showing what each zone contributed."
+  (with-output-to-string (s)
+    (format s "~&[context] assemble report~%")
+    (format s "  total budget: ~D tok~%" total-budget)
+    (dolist (zr zone-results)
+      (format s "  ~A~%" (%ctx-zone-format zr)))
+    (let ((detailed (%ctx-zone-detail (car (last zone-results)))))
+      (when (and (plusp (length detailed))
+                 (zone-result-extra (car (last zone-results))))
+        (format s "  -- recall ranking --~%")
+        (format s "~A" detailed)))
+    (format s "[context] end report~%")))

@@ -3,8 +3,11 @@
 (in-package #:reflex.tools)
 
 (defun %read-file (arguments)
-  (let* ((path (cdr (assoc "path" arguments :test #'string=)))
-         (limit (or (cdr (assoc "limit" arguments :test #'string=)) 1000000)))
+  (let* ((path (or (cdr (assoc "path" arguments :test #'string=))
+                   (cdr (assoc :path arguments :test #'eq))))
+         (limit (or (cdr (assoc "limit" arguments :test #'string=))
+                    (cdr (assoc :limit arguments :test #'eq))
+                    1000000)))
     (handler-case
         (with-open-file (s path :direction :input)
           (let ((buf (make-string limit)))

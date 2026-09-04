@@ -12,6 +12,16 @@ same conversation.")
   "Maximum number of tool-call rounds per user turn.  Protects against
 infinite loops when the LLM keeps calling tools indefinitely.")
 
+(defvar *last-finish-reason* nil
+  "Finish reason from the most recent LLM call.  Set by AGENT-SEND when
+the response is empty so %LLM-LINE can explain why.  Common values:
+:STOP (normal end), :LENGTH (truncated by max_tokens), :CONTENT_FILTER
+(blocked by safety), :TOOL_CALLS (model chose to call a tool).")
+
+(defvar *last-raw-body* nil
+  "Raw response body from the most recent LLM call.  Useful for debugging
+empty or malformed responses.  Set by AGENT-SEND.")
+
 (defun %make-tool-call-message (tool-calls)
   "Build an assistant message alist that contains every TOOL-CALL in a single
 tool_calls array, as required by OpenAI."
@@ -69,8 +79,8 @@ tool_calls array, as required by OpenAI."
     (format t "    ~A => ~A~%" name preview)))
 
 (defun %single-round (prompt history)
-  "Make a single LLM call. Returns (values content tool-calls)."
-  (send-prompt prompt :history history))
+  "Make a single LLM call. Returns (values content tool-calls meta)."
+  (send-prompt prompt :history history :return-meta t :max-tokens 1024))
 
 (defun %dispatch-tools (tool-calls history)
   "Append assistant + tool messages to HISTORY and return the new history."
@@ -104,37 +114,49 @@ tool_calls array, as required by OpenAI."
 (defun agent-send (line &key history (max-iterations *max-tool-iterations*))
   "Send LINE to the LLM and dispatch any tool calls.
 HISTORY is a list of prior message alists; when non-nil it is forwarded to
-SEND-PROMPT. Returns the final assistant content string and updates
-*SESSION-HISTORY*."
+SEND-PROMPT. Returns (values final-content updated-history)."
   (let ((history (or history *session-history*))
-        (prompt line)
         (final-content ""))
-    ;; Persist the user turn before the first LLM call
+    ;; Add user message to history so it's visible to the model on all rounds
+    (setf history (append history (list (make-message "user" line))))
+    ;; Persist the user turn
     (handler-case
         (reflex.context::%persist-turn "user" "user" line)
       (error () nil))
     (loop repeat max-iterations do
           (handler-case
-              (multiple-value-bind (content tool-calls)
-                  (%single-round prompt history)
-                (cond
-                  ((null tool-calls)
-                   (setf final-content content)
-                   ;; Persist the final assistant reply
-                   (handler-case
-                       (reflex.context::%persist-turn "assistant" "assistant"
-                                                     content)
-                     (error () nil))
-                   (return-from agent-send final-content))
-                  (t
-                   (setf history (%dispatch-tools tool-calls history))
-                   (setf prompt ""))))
+              (let* ((context-prompt
+                       (reflex.context:context-assemble-prompt
+                        line
+                        :session-id *current-session-id*
+                        :report-stream *standard-output*)))
+                (multiple-value-bind (content tool-calls meta)
+                    (send-prompt ""
+                                 :history history
+                                 :system-prompt context-prompt
+                                 :return-meta t
+                                 :max-tokens 1024)
+                  (cond
+                    ((null tool-calls)
+                     (setf final-content content)
+                     ;; If empty, leave a diagnostic on *last-finish-reason*
+                     ;; so %llm-line can explain why.
+                     (when (and (string= content "")
+                                meta (getf meta :finish-reason))
+                       (setf *last-finish-reason* (getf meta :finish-reason)))
+                     ;; Persist the final assistant reply
+                     (handler-case
+                         (reflex.context::%persist-turn "assistant" "assistant"
+                                                       content)
+                       (error () nil))
+                     (return-from agent-send (values final-content history)))
+                    (t
+                     (setf history (%dispatch-tools tool-calls history))))))
             (error (e)
               (format t "~%ERROR: ~A~%" e)
-              (return-from agent-send nil))))
+              (return-from agent-send (values nil history)))))
     (format t "~%WARN: max tool iterations (~A) reached~%" max-iterations)
-    (setf *session-history* history)
-    final-content))
+    (values final-content history)))
 
 (defun %eval-lisp-line (line)
   (format t "~%---------~%")
@@ -143,12 +165,22 @@ SEND-PROMPT. Returns the final assistant content string and updates
   (format t "---------~%"))
 
 (defun %llm-line (line)
-  (let ((reply (agent-send line :history *session-history*)))
-    (when reply
-      (setf *session-history*
-            (append *session-history*
-                    (list (make-message "user" line)
-                          (make-message "assistant" reply)))))
+  (setf *last-finish-reason* nil)
+  (multiple-value-bind (reply new-history)
+      (agent-send line :history *session-history*)
+    (setf *session-history* new-history)
+    (cond
+      ((null reply)
+       (format t "~%[no response from LLM]~%"))
+      ((string= reply "")
+       (let ((reason *last-finish-reason*))
+         (format t "~%[empty response~@[ (finish_reason=~A)~]]~%"
+                 reason)))
+      (t
+       ;; Streaming mode already prints tokens as they arrive; only print
+       ;; here when we received the full reply at once.
+       (unless *use-streaming*
+         (format t "~%~A~%" reply))))
     reply))
 
 (defun query-loop ()

@@ -2,7 +2,7 @@
 
 (defpackage #:reflex-test
   (:use #:cl)
-  (:export #:run-tests #:test-sqlite))
+  (:export #:run-tests #:test-sqlite #:test-context-relevance))
 
 (in-package #:reflex-test)
 

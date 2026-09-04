@@ -35,18 +35,27 @@ Each row: (id kind role content caveman tokens)."
 
 (defun %ctx-zone-verbatim (session-id n &key (token-budget most-positive-fixnum))
   "Build zone A: the last N rows for SESSION-ID, verbatim, within TOKEN-BUDGET.
-Returns (values lines used-tokens)."
+Returns a ZONE-RESULT plist."
   (let ((db (%ctx-connect))
         (lines '())
-        (used 0))
+        (used 0)
+        (skipped 0)
+        (total-fetched 0))
     (unwind-protect
          (progn
            (dolist (row (%ctx-fetch-recent db session-id n))
+             (incf total-fetched)
              (let* ((line (%ctx-format-verbatim row))
                     (cost (%ctx-tokens-of line)))
                (when (> (+ used cost) token-budget)
+                 (incf skipped)
                  (return))
                (push line lines)
                (incf used cost)))
-           (values (nreverse lines) used))
+           (make-zone-result
+            :label   "Recent (verbatim)"
+            :lines   (nreverse lines)
+            :used    used
+            :budget  token-budget
+            :skipped skipped))
       (sqlite:disconnect db))))

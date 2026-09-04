@@ -3,8 +3,10 @@
 (in-package #:reflex.tools)
 
 (defun %write-file (arguments)
-  (let* ((path    (cdr (assoc "path" arguments :test #'string=)))
-         (content (cdr (assoc "content" arguments :test #'string=))))
+  (let* ((path    (or (cdr (assoc "path" arguments :test #'string=))
+                      (cdr (assoc :path arguments :test #'eq))))
+         (content (or (cdr (assoc "content" arguments :test #'string=))
+                      (cdr (assoc :content arguments :test #'eq)))))
     (handler-case
         (progn
           (ensure-directories-exist path)

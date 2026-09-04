@@ -3,19 +3,20 @@
 (in-package #:reflex.tools)
 
 (defun %edit-file (arguments)
-  (let* ((path  (cdr (assoc "path" arguments :test #'string=)))
-         (old   (cdr (assoc "old" arguments :test #'string=)))
-         (new   (cdr (assoc "new" arguments :test #'string=))))
+  (let* ((path  (or (cdr (assoc "path" arguments :test #'string=))
+                    (cdr (assoc :path arguments :test #'eq))))
+         (old   (or (cdr (assoc "old" arguments :test #'string=))
+                    (cdr (assoc :old arguments :test #'eq))))
+         (new   (or (cdr (assoc "new" arguments :test #'string=))
+                    (cdr (assoc :new arguments :test #'eq)))))
     (handler-case
-        (let ((text (uiop:read-file-string path))
+        (let ((full (uiop:read-file-string path))
               (start (search old (uiop:read-file-string path))))
-          (declare (ignore text))
           (cond
             ((null start)
              (format nil "ERROR: substring not found in ~A" path))
             (t
-             (let* ((full (uiop:read-file-string path))
-                    (head (subseq full 0 start))
+             (let* ((head (subseq full 0 start))
                     (tail (subseq full (+ start (length old))))
                     (replacement (concatenate 'string head new tail)))
                (with-open-file (s path :direction :output :if-exists :supersede)

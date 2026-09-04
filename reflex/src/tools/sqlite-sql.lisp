@@ -52,9 +52,13 @@
   (format nil "OK; last-insert-rowid=~A" (sqlite:last-insert-rowid db)))
 
 (defun %sqlite-sql (arguments)
-  (let* ((path (%resolve-db-path (cdr (assoc "db" arguments :test #'string=))))
-         (sql (cdr (assoc "sql" arguments :test #'string=)))
-         (params (cdr (assoc "params" arguments :test #'string=))))
+  (let* ((path  (%resolve-db-path
+                 (or (cdr (assoc "db" arguments :test #'string=))
+                     (cdr (assoc :db arguments :test #'eq)))))
+         (sql   (or (cdr (assoc "sql" arguments :test #'string=))
+                    (cdr (assoc :sql arguments :test #'eq))))
+         (params (or (cdr (assoc "params" arguments :test #'string=))
+                     (cdr (assoc :params arguments :test #'eq)))))
     (if (null sql)
         "ERROR: missing required parameter 'sql'"
         (handler-case

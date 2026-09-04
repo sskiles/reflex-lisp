@@ -41,18 +41,25 @@ Uses cached caveman; falls back to context-caveman for stale rows."
 
 (defun %ctx-zone-caveman (session-id skip n &key (token-budget most-positive-fixnum))
   "Build zone B: rows offset by SKIP (e.g. after zone A), caveman form.
-Returns (values lines used-tokens)."
+Returns a ZONE-RESULT plist."
   (let ((db (%ctx-connect))
         (lines '())
-        (used 0))
+        (used 0)
+        (skipped 0))
     (unwind-protect
          (progn
            (dolist (row (%ctx-fetch-caveman db session-id skip n))
              (let* ((line (%ctx-format-caveman row))
                     (cost (%ctx-tokens-of line)))
                (when (> (+ used cost) token-budget)
+                 (incf skipped)
                  (return))
                (push line lines)
                (incf used cost)))
-           (values (nreverse lines) used))
+           (make-zone-result
+            :label   "Earlier (caveman)"
+            :lines   (nreverse lines)
+            :used    used
+            :budget  token-budget
+            :skipped skipped))
       (sqlite:disconnect db))))

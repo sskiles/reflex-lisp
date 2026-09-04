@@ -27,6 +27,12 @@ LISP CODING BEST PRACTICES:
 - Before committing edits, run Lisp code and tests locally via the `eval-lisp` tool to confirm correctness.
 - The running SBCL image is fully interactive and live; modify variables, redefine functions, and inspect any state dynamically.
 
+WORKFLOW:
+1. User asks a question or gives a task.
+2. If you need information, call the appropriate tool(s).
+3. After receiving tool results, ANSWER THE USER'S QUESTION or COMPLETE THE TASK.
+4. Do NOT ask the user what to do next after using a tool — you were given a task, complete it.
+
 Work in the current directory. Prefer reading files before editing. Be concise. Show your work by executing code, not just describing it."
   "Default system prompt used by SEND-PROMPT and ASK.")
 
@@ -107,9 +113,10 @@ chat-completions request body. TOOLS is a list of tool schemas or NIL."
 
 (defun %response-content (body)
   "Extract the first assistant message from a JSON response BODY string.
-Returns (values content tool-calls) where CONTENT is the message text (or
-empty string) and TOOL-CALLS is a list of (id . ((name . name) (arguments .
-decoded-args))) alists."
+Returns (values content tool-calls meta) where CONTENT is the message text
+(or empty string), TOOL-CALLS is a list of (id name arguments) alists, and
+META is a plist (:FINISH-REASON ... :USAGE ...) useful for diagnosing
+empty or truncated responses."
   (let ((decoded (handler-case
                      (json:decode-json-from-string body)
                    (error () nil))))
@@ -117,15 +124,21 @@ decoded-args))) alists."
            (first-choice (and (listp choices) (first choices)))
            (message (and first-choice (%json-value :MESSAGE first-choice)))
            (content (and message (%json-value :CONTENT message)))
-           (reasoning (or (and message (%json-value :REASONING_CONTENT message))
-                          (and decoded (%json-value :REASONING_CONTENT decoded))
+           (reasoning (or (and message (%json-value :REASONING--CONTENT message))
+                          (and decoded (%json-value :REASONING--CONTENT decoded))
                           (and decoded (%json-value :REASONING decoded))))
-           (raw-tool-calls (and message (%json-value :TOOL_CALLS message))))
+           (raw-tool-calls (and message (%json-value :TOOL--CALLS message)))
+           (finish-reason (and first-choice (%json-value :FINISH--REASON first-choice)))
+           (usage (and decoded (%json-value :USAGE decoded))))
       (let ((final-content
               (cond
                 ((and content (stringp content) (not (zerop (length content))))
                  content)
-                ((and reasoning (stringp reasoning) (not (zerop (length reasoning))))
+                ;; Only fall back to reasoning when there are NO tool calls.
+                ;; When tools are called, the model hasn't given a final answer yet;
+                ;; reasoning is just internal tool-selection logic, not a response.
+                ((and (not raw-tool-calls)
+                      (and reasoning (stringp reasoning) (not (zerop (length reasoning)))))
                  reasoning)
                 (t "")))
             (parsed-calls
@@ -148,8 +161,9 @@ decoded-args))) alists."
                             (list (cons :id id)
                                   (cons :name name)
                                   (cons :arguments args))))
-                        raw-tool-calls))))
-        (values final-content parsed-calls)))))
+                        raw-tool-calls)))
+            (meta (list :finish-reason finish-reason :usage usage)))
+        (values final-content parsed-calls meta)))))
 
 (define-condition llm-request-error (error)
   ((url :initarg :url :reader llm-request-error-url)
@@ -177,7 +191,9 @@ decoded-args))) alists."
                     (top-p 1.0d0)
                     stop
                     (stream-p *use-streaming*)
-                    (request-function #'dexador:request))
+                    (request-function #'dexador:request)
+                    return-meta
+                    debug)
   "Send PROMPT to an OpenAI-compatible chat-completions endpoint.
 
 PROMPT is the string sent as the current user message.  ENDPOINT defaults to
@@ -188,6 +204,9 @@ TOOLS to the schemas of every registered tool in REFLEX.TOOLS:*TOOLS*.
 Returns two values: the response content string and a list of tool-call
 alists of the shape ((:ID . \"...\") (:NAME . \"...\") (:ARGUMENTS . alist)).
 Tool-call alists are non-empty only when the LLM chose to invoke tools.
+
+When RETURN-META is non-nil, returns a third value: a plist with
+:FINISH-REASON and :USAGE for diagnosing empty or truncated responses.
 
 REQUEST-FUNCTION exists primarily for tests and protocol adapters; it is called
 with the same arguments accepted by DEXADOR:REQUEST."
@@ -218,7 +237,14 @@ with the same arguments accepted by DEXADOR:REQUEST."
                    :url endpoint
                    :status status
                    :body body))
-          (%response-content body)))))
+          (multiple-value-bind (content tool-calls meta)
+              (%response-content body)
+            (when debug
+              (format *error-output*
+                      "~&[reflex] raw response body:~%~A~%" body))
+            (if return-meta
+                (values content tool-calls meta)
+                (values content tool-calls)))))))
 
 ;; -------------------------------------------------------------
 ;; Streaming implementation – reads token chunks from the LLM and prints them
